@@ -420,15 +420,17 @@ export class TIFFImageryProvider {
     try {
       // 如果是单波段渲染,创建plot对象
       if (this.renderOptions.single) {
-        const band = this.bands[single.band];
-        if (!single.expression && !band) {
-          throw new DeveloperError(`Invalid band${single.band}`);
+        const bandNum = single.band ?? 1;
+        const band = this.bands[bandNum];
+        if (!single.expression && !band && !single.domain) {
+          throw new DeveloperError(`Invalid band${bandNum}`);
         }
-        const domain = single.domain ?? [band.min, band.max]
+        const domain = single.domain ?? [band?.min ?? 0, band?.max ?? 1]
         const canvas = createCanavas(this.tileWidth, this.tileHeight);
         this.plot = new plot({
           canvas,
           ...single,
+          band: bandNum,
           domain,
           tileWidth: this.tileWidth,
           tileHeight: this.tileHeight,
@@ -655,6 +657,7 @@ export class TIFFImageryProvider {
         window: [x0, y0, x1, y1] as [number, number, number, number]
       };
     } catch (error) {
+      console.error('Error in _loadTile:', error);
       this.errorEvent.raiseEvent(error);
       throw error;
     }
