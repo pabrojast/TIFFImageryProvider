@@ -356,7 +356,7 @@ export class TIFFImageryProvider {
           }
         }
 
-        if (single && !single.expression && single.band === bandNum && single.domain) {
+        if (single && !single.expression && (single.band ?? 1) === bandNum && single.domain) {
           bands[bandNum] = {
             min: single.domain[0],
             max: single.domain[1],
