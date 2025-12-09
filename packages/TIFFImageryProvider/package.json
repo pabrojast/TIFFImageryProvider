@@ -1,7 +1,7 @@
 {
-  "name": "terriajs-tiff-imagery-provider",
+  "name": "@pabrojast/terriajs-tiff-imagery-provider",
   "type": "module",
-  "version": "2.15.1",
+  "version": "2.15.3",
   "description": "Load GeoTIFF/COG(Cloud optimized GeoTIFF) on Cesium",
   "keywords": [
     "cesium",
@@ -19,7 +19,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hongfaqiu/tiff-imagery-provider.git"
+    "url": "git+https://github.com/pabrojast/TIFFImageryProvider.git"
   },
   "scripts": {
     "dev": "rimraf dist && rollup -c --watch",
