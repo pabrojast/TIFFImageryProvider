@@ -10,6 +10,36 @@ const pkg = JSON.parse(
 
 const deps = { ...pkg.dependencies, ...pkg.peerDependencies };
 const external = Object.keys(deps)
+
+// Plugin to add .js extension to terriajs-cesium imports in output
+function addJsExtensionPlugin() {
+  return {
+    name: 'add-js-extension',
+    renderChunk(code) {
+      // Add .js to terriajs-cesium imports (both with 'from' and bare imports)
+      return code
+        .replace(
+          /from\s+['"]terriajs-cesium\/Source\/(Core|Scene)\/([^'"]+)['"]/g,
+          (match, folder, module) => {
+            if (!module.endsWith('.js')) {
+              return `from 'terriajs-cesium/Source/${folder}/${module}.js'`;
+            }
+            return match;
+          }
+        )
+        .replace(
+          /import\s+['"]terriajs-cesium\/Source\/(Core|Scene)\/([^'"]+)['"]/g,
+          (match, folder, module) => {
+            if (!module.endsWith('.js')) {
+              return `import 'terriajs-cesium/Source/${folder}/${module}.js'`;
+            }
+            return match;
+          }
+        );
+    }
+  };
+}
+
 /**
  * @type {import('rollup').RollupOptions}
  */
@@ -35,6 +65,7 @@ const config = [
       webWorkerLoader({
         extensions: ["ts", "js"],
       }),
+      addJsExtensionPlugin(),
     ]
   }, 
   {
