@@ -1,24 +1,30 @@
 import { Color } from "../terriajs-cesium-imports";
 import { TypedArray } from "geotiff";
 
-export function getMinMax(data: number[], nodata: number) {
-  let min: number, max: number;
+export function getMinMax(data: number[], nodata: number): { min: number; max: number } {
+  let min: number | undefined, max: number | undefined;
   for (let j = 0; j < data.length; j += 1) {
     const val = data[j];
-    if (val === nodata) continue;
+    if (val === nodata || !Number.isFinite(val)) continue;
     if (min === undefined && max === undefined) {
       min = max = val;
       continue;
     }
-    if (val < min) {
+    if (val < min!) {
       min = val;
-    } else if (val > max) {
+    } else if (val > max!) {
       max = val;
     }
   }
-  return {
-    min, max
+  // Return default range if no valid data found
+  if (min === undefined || max === undefined) {
+    return { min: 0, max: 1 };
   }
+  // Handle case where min equals max (constant raster)
+  if (min === max) {
+    return { min: min - 0.5, max: max + 0.5 };
+  }
+  return { min, max };
 }
 
 export function decimal2rgb(number: number) {

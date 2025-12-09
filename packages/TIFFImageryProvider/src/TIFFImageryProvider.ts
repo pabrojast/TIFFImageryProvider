@@ -367,12 +367,51 @@ export class TIFFImageryProvider {
           // Try to get the maximum and minimum values ​​of the band
           console.warn(`Can not get band${bandNum} min/max, try to calculate min/max values, or setting ${single ? 'domain' : 'min / max'}`)
 
-          const previewImage = await source.getImage(this.requestLevels[0])
-          const data = (await previewImage.readRasters({
-            samples: [i],
-            pool: this.geotiffWorkerPool,
-          }) as unknown as number[][])[0].filter((item: any) => !isNaN(item))
-          bands[bandNum] = getMinMax(data, noData)
+          try {
+            // Use the smallest overview available for faster min/max calculation
+            const smallestOverviewIndex = this._imageCount - 1;
+            const previewImage = await source.getImage(smallestOverviewIndex);
+            const previewWidth = previewImage.getWidth();
+            const previewHeight = previewImage.getHeight();
+            
+            // If the smallest overview is still very large, sample a subset
+            const maxSamplePixels = 1024 * 1024; // 1 million pixels max
+            const totalPixels = previewWidth * previewHeight;
+            
+            let data: number[];
+            if (totalPixels > maxSamplePixels) {
+              // Sample a subset of the image (center region)
+              const sampleSize = Math.floor(Math.sqrt(maxSamplePixels));
+              const startX = Math.floor((previewWidth - sampleSize) / 2);
+              const startY = Math.floor((previewHeight - sampleSize) / 2);
+              const window = [startX, startY, startX + sampleSize, startY + sampleSize];
+              
+              const rasters = await previewImage.readRasters({
+                samples: [i],
+                window,
+                pool: this.geotiffWorkerPool,
+              });
+              data = Array.from((rasters as unknown as number[][])[0]).filter((item: any) => !isNaN(item) && item !== noData);
+            } else {
+              const rasters = await previewImage.readRasters({
+                samples: [i],
+                pool: this.geotiffWorkerPool,
+              });
+              data = Array.from((rasters as unknown as number[][])[0]).filter((item: any) => !isNaN(item) && item !== noData);
+            }
+            
+            if (data.length > 0) {
+              bands[bandNum] = getMinMax(data, noData);
+            } else {
+              // Fallback to reasonable defaults for Float32 data
+              console.warn(`Could not calculate min/max for band${bandNum}, using default range [0, 1]`);
+              bands[bandNum] = { min: 0, max: 1 };
+            }
+          } catch (calcError) {
+            console.error(`Error calculating min/max for band${bandNum}:`, calcError);
+            // Fallback to reasonable defaults
+            bands[bandNum] = { min: 0, max: 1 };
+          }
         }
       }
     }))
