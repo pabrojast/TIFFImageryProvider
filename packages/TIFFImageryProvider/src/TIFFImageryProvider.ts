@@ -577,6 +577,8 @@ export class TIFFImageryProvider {
       Math.round((x + 1) * tilePixel.xWidth),
       Math.round((y + 1) * tilePixel.yWidth),
     ];
+    
+    console.debug(`[TIFFImageryProvider] _loadTile: req(${reqx},${reqy},${reqz}) -> tile(${x},${y},${z}), image: ${width}x${height}, tiles: ${tileXNum}x${tileYNum}, window: [${window.join(',')}]`);
 
     if (this._proj && this.tilingScheme instanceof TIFFImageryProviderTilingScheme) {
       const targetRect = this.tilingScheme.tileXYToNativeRectangle2(x, y, z);
@@ -697,9 +699,24 @@ export class TIFFImageryProvider {
 
     try {
       const { width, height, data, window } = await this._loadTile(x, y, z);
+      
+      console.debug(`[TIFFImageryProvider] Tile ${x},${y},${z}: loaded ${width}x${height}, data bands: ${data?.length || 0}`);
 
-      if (this._destroyed || !width || !height) {
+      if (this._destroyed) {
         return undefined;
+      }
+      
+      if (!width || !height) {
+        // Return a transparent tile instead of undefined for empty tiles
+        console.debug(`[TIFFImageryProvider] Tile ${x},${y},${z}: empty tile, returning transparent canvas`);
+        const emptyCanvas = createCanavas(this.tileWidth, this.tileHeight);
+        return emptyCanvas;
+      }
+      
+      if (!data || data.length === 0) {
+        console.warn(`[TIFFImageryProvider] Tile ${x},${y},${z}: no data returned`);
+        const emptyCanvas = createCanavas(this.tileWidth, this.tileHeight);
+        return emptyCanvas;
       }
 
       let result: ImageData | HTMLImageElement | HTMLCanvasElement | OffscreenCanvas;
@@ -739,12 +756,6 @@ export class TIFFImageryProvider {
           this.readSamples.forEach((sample, index) => {
             targetPlot.addDataset(`b${sample + 1}`, data[index], width, height);
           });
-
-          if (single.expression) {
-            targetPlot.render(window);
-          } else {
-            targetPlot.renderDataset(`b${single.band}`, window);
-          }
         } else {
           console.error('Cannot render tile: single=', !!single, 'this.plot=', !!this.plot, 'multi=', !!multi, 'convertToRGB=', !!convertToRGB);
           return undefined;
@@ -754,7 +765,13 @@ export class TIFFImageryProvider {
         targetPlot.setInterpolationMethod(this.renderOptions.resampleMethod || 'nearest');
 
         // Render to canvas
-        targetPlot.render(window);
+        if (single?.expression) {
+          targetPlot.render(window);
+        } else if (single) {
+          targetPlot.renderDataset(`b${single.band}`, window);
+        } else {
+          targetPlot.render(window);
+        }
         const canv = createCanavas(this.tileWidth, this.tileHeight);
         const ctx = canv.getContext("2d") as CanvasRenderingContext2D;
         ctx.drawImage(targetPlot.canvas, 0, 0);
@@ -775,9 +792,11 @@ export class TIFFImageryProvider {
         return undefined;
       }
     } catch (e) {
-      console.error(e);
+      console.error('Error in requestImage:', e);
       this.errorEvent.raiseEvent(e);
-      throw e;
+      // Return an empty canvas instead of throwing to prevent Cesium tile errors
+      const emptyCanvas = createCanavas(this.tileWidth, this.tileHeight);
+      return emptyCanvas;
     }
   }
 
