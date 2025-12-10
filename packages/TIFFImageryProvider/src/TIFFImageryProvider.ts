@@ -729,6 +729,7 @@ export class TIFFImageryProvider {
             targetPlot.renderDataset(`b${single.band}`, window);
           }
         } else {
+          console.error('Cannot render tile: single=', !!single, 'this.plot=', !!this.plot, 'multi=', !!multi, 'convertToRGB=', !!convertToRGB);
           return undefined;
         }
 
