@@ -596,8 +596,20 @@ export class TIFFImageryProvider {
     if (this.reverseY) {
       window = [window[0], height - window[3], window[2], height - window[1]];
     }
-    window = [window[0] - this._buffer, window[1] - this._buffer, window[2] + this._buffer, window[3] + this._buffer]
-    const sourceWidth = window[2] - window[0], sourceHeight = window[3] - window[1];
+
+    // Expand the window for interpolation buffer but clamp it to valid bounds.
+    window = [
+      Math.max(0, window[0] - this._buffer),
+      Math.max(0, window[1] - this._buffer),
+      Math.min(width, window[2] + this._buffer),
+      Math.min(height, window[3] + this._buffer)
+    ];
+
+    const sourceWidth = Math.max(0, window[2] - window[0]);
+    const sourceHeight = Math.max(0, window[3] - window[1]);
+    if (sourceWidth === 0 || sourceHeight === 0) {
+      throw new Error("Buffered window is outside image bounds");
+    }
 
     const options = {
       window,
