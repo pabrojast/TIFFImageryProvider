@@ -608,7 +608,12 @@ export class TIFFImageryProvider {
     const sourceWidth = Math.max(0, window[2] - window[0]);
     const sourceHeight = Math.max(0, window[3] - window[1]);
     if (sourceWidth === 0 || sourceHeight === 0) {
-      throw new Error("Buffered window is outside image bounds");
+      return {
+        data: [],
+        width: 0,
+        height: 0,
+        window: [0, 0, 0, 0]
+      };
     }
 
     const options = {
