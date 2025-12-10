@@ -180,6 +180,7 @@ export class TIFFImageryProvider {
   private _imageCount!: number;
   private _images: (GeoTIFFImage | null)[] = [];
   private _imagesCache: Map<string, ImageData | HTMLCanvasElement | HTMLImageElement | OffscreenCanvas> = new Map();
+  private _pendingRequests: Map<string, Promise<HTMLCanvasElement | OffscreenCanvas | undefined>> = new Map();
   private _cacheSize: number;
   private _isTiled: boolean;
   private _proj?: {
@@ -192,6 +193,7 @@ export class TIFFImageryProvider {
   reverseY: boolean = false;
   samples: number;
   geotiffWorkerPool: Pool;
+  private _renderMutex: Promise<void> = Promise.resolve();
   private _buffer: number = 1;
   private _rgbPlot: plot;
 
@@ -691,13 +693,34 @@ export class TIFFImageryProvider {
     if (z < this.minimumLevel || z > this.maximumLevel) return undefined;
 
     const cacheKey = `${x}_${y}_${z}`;
+    
+    // Return cached result if available
     if (this._imagesCache.has(cacheKey)) {
       return this._imagesCache.get(cacheKey);
     }
 
+    // If there's already a pending request for this tile, wait for it
+    if (this._pendingRequests.has(cacheKey)) {
+      return this._pendingRequests.get(cacheKey);
+    }
+
+    // Create the request promise
+    const requestPromise = this._doRequestImage(x, y, z, cacheKey);
+    this._pendingRequests.set(cacheKey, requestPromise);
+    
+    try {
+      const result = await requestPromise;
+      return result;
+    } finally {
+      this._pendingRequests.delete(cacheKey);
+    }
+  }
+
+  private async _doRequestImage(x: number, y: number, z: number, cacheKey: string): Promise<HTMLCanvasElement | OffscreenCanvas | undefined> {
     const { single, multi, convertToRGB } = this.renderOptions;
 
     try {
+      // Load tile data (can happen in parallel)
       const { width, height, data, window } = await this._loadTile(x, y, z);
       
       console.debug(`[TIFFImageryProvider] Tile ${x},${y},${z}: loaded ${width}x${height}, data bands: ${data?.length || 0}`);
@@ -707,7 +730,6 @@ export class TIFFImageryProvider {
       }
       
       if (!width || !height) {
-        // Return a transparent tile instead of undefined for empty tiles
         console.debug(`[TIFFImageryProvider] Tile ${x},${y},${z}: empty tile, returning transparent canvas`);
         const emptyCanvas = createCanavas(this.tileWidth, this.tileHeight);
         return emptyCanvas;
@@ -719,84 +741,127 @@ export class TIFFImageryProvider {
         return emptyCanvas;
       }
 
-      let result: ImageData | HTMLImageElement | HTMLCanvasElement | OffscreenCanvas;
-      let targetPlot: plot;
-
-      try {
-        // Determine which plot to use
-        if (multi || convertToRGB) {
-          if (!this._rgbPlot) {
-            console.warn('RGB plot not initialized');
-            return undefined;
-          }
-          targetPlot = this._rgbPlot;
-
-          // Setup RGB rendering
-          targetPlot.removeAllDataset();
-          data.forEach((bandData, index) => {
-            targetPlot.addDataset(`band${index + 1}`, bandData, width, height);
-          });
-
-          targetPlot.setRGBOptions({
-            bands: multi ?? ['r', 'g', 'b'].reduce((pre, val, index) => ({
-              ...pre,
-              [val]: {
-                band: index + 1,
-                min: 0,
-                max: 255
-              }
-            }), {}),
-            colorMapping: this.renderOptions.colorMapping
-          });
-        } else if (single && this.plot) {
-          targetPlot = this.plot;
-
-          // Setup single band rendering
-          targetPlot.removeAllDataset();
-          this.readSamples.forEach((sample, index) => {
-            targetPlot.addDataset(`b${sample + 1}`, data[index], width, height);
-          });
-        } else {
-          console.error('Cannot render tile: single=', !!single, 'this.plot=', !!this.plot, 'multi=', !!multi, 'convertToRGB=', !!convertToRGB);
-          return undefined;
-        }
-
-        // Set interpolation method
-        targetPlot.setInterpolationMethod(this.renderOptions.resampleMethod || 'nearest');
-
-        // Render to canvas
-        if (single?.expression) {
-          targetPlot.render(window);
-        } else if (single) {
-          targetPlot.renderDataset(`b${single.band}`, window);
-        } else {
-          targetPlot.render(window);
-        }
-        const canv = createCanavas(this.tileWidth, this.tileHeight);
-        const ctx = canv.getContext("2d") as CanvasRenderingContext2D;
-        ctx.drawImage(targetPlot.canvas, 0, 0);
-        result = canv;
-
-        // Cache the result
-        if (result) {
-          if (this._imagesCache.size >= this._cacheSize) {
-            const oldestKey = this._imagesCache.keys().next().value;
-            this._imagesCache.delete(oldestKey);
-          }
-          this._imagesCache.set(cacheKey, result);
-        }
-
-        return result;
-      } catch (e) {
-        console.error('Error during rendering:', e);
-        return undefined;
-      }
+      // Serialize rendering to avoid WebGL context conflicts
+      const renderResult = await this._renderTile(x, y, z, width, height, data, window, cacheKey);
+      return renderResult;
     } catch (e) {
-      console.error('Error in requestImage:', e);
+      console.error('Error in _doRequestImage:', e);
       this.errorEvent.raiseEvent(e);
-      // Return an empty canvas instead of throwing to prevent Cesium tile errors
       const emptyCanvas = createCanavas(this.tileWidth, this.tileHeight);
       return emptyCanvas;
+    }
+  }
+
+  private async _renderTile(
+    x: number, y: number, z: number,
+    width: number, height: number,
+    data: TypedArray[],
+    window: [number, number, number, number],
+    cacheKey: string
+  ): Promise<HTMLCanvasElement | OffscreenCanvas | undefined> {
+    // Wait for previous render to complete
+    const previousRender = this._renderMutex;
+    let resolveRender: () => void;
+    this._renderMutex = new Promise<void>((resolve) => {
+      resolveRender = resolve;
+    });
+
+    try {
+      await previousRender;
+      
+      if (this._destroyed) {
+        return undefined;
+      }
+
+      const { single, multi, convertToRGB } = this.renderOptions;
+      let result: HTMLCanvasElement | OffscreenCanvas;
+      let targetPlot: plot;
+
+      // Determine which plot to use
+      if (multi || convertToRGB) {
+        if (!this._rgbPlot) {
+          console.warn('RGB plot not initialized');
+          return undefined;
+        }
+        targetPlot = this._rgbPlot;
+
+        // Setup RGB rendering
+        targetPlot.removeAllDataset();
+        data.forEach((bandData, index) => {
+          targetPlot.addDataset(`band${index + 1}`, bandData, width, height);
+        });
+
+        targetPlot.setRGBOptions({
+          bands: multi ?? ['r', 'g', 'b'].reduce((pre, val, index) => ({
+            ...pre,
+            [val]: {
+              band: index + 1,
+              min: 0,
+              max: 255
+            }
+          }), {}),
+          colorMapping: this.renderOptions.colorMapping
+        });
+      } else if (single && this.plot) {
+        targetPlot = this.plot;
+
+        // Setup single band rendering
+        targetPlot.removeAllDataset();
+        this.readSamples.forEach((sample, index) => {
+          targetPlot.addDataset(`b${sample + 1}`, data[index], width, height);
+        });
+      } else {
+        console.error('Cannot render tile: single=', !!single, 'this.plot=', !!this.plot, 'multi=', !!multi, 'convertToRGB=', !!convertToRGB);
+        return undefined;
+      }
+
+      // Set interpolation method
+      targetPlot.setInterpolationMethod(this.renderOptions.resampleMethod || 'nearest');
+
+      // Render to canvas
+      if (single?.expression) {
+        console.debug(`[TIFFImageryProvider] Tile ${x},${y},${z}: rendering with expression`);
+        targetPlot.render(window);
+      } else if (single) {
+        console.debug(`[TIFFImageryProvider] Tile ${x},${y},${z}: rendering single band b${single.band}`);
+        targetPlot.renderDataset(`b${single.band}`, window);
+      } else {
+        console.debug(`[TIFFImageryProvider] Tile ${x},${y},${z}: rendering RGB`);
+        targetPlot.render(window);
+      }
+      
+      console.debug(`[TIFFImageryProvider] Tile ${x},${y},${z}: plot canvas size: ${targetPlot.canvas.width}x${targetPlot.canvas.height}`);
+      
+      const canv = createCanavas(this.tileWidth, this.tileHeight);
+      const ctx = canv.getContext("2d") as CanvasRenderingContext2D;
+      
+      if (!ctx) {
+        console.error(`[TIFFImageryProvider] Tile ${x},${y},${z}: Failed to get 2D context`);
+        return undefined;
+      }
+      
+      ctx.drawImage(targetPlot.canvas, 0, 0);
+      console.debug(`[TIFFImageryProvider] Tile ${x},${y},${z}: successfully drew to output canvas ${canv.width}x${canv.height}`);
+      result = canv;
+
+      // Cache the result
+      if (result) {
+        if (this._imagesCache.size >= this._cacheSize) {
+          const oldestKey = this._imagesCache.keys().next().value;
+          this._imagesCache.delete(oldestKey);
+        }
+        this._imagesCache.set(cacheKey, result);
+      }
+
+      return result;
+    } catch (e) {
+      console.error('Error in _renderTile:', e);
+      this.errorEvent.raiseEvent(e);
+      const emptyCanvas = createCanavas(this.tileWidth, this.tileHeight);
+      return emptyCanvas;
+    } finally {
+      // Always release the mutex
+      resolveRender!();
     }
   }
 
